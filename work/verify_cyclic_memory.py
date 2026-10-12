@@ -1,6 +1,7 @@
 """Independent full-width source recurrence for the default public-memory model.
 
-The oracle commits delta = previous + pub(N1(h)) directly. Two modes:
+The oracle commits pub(N1(h)), adding the previous value only for the legacy
+residual_write control. Two modes:
 
 - default: generic shape/dtype checks plus full checks of the packaged
   standalone weights (decode, immutable history, memory bytes, and a
@@ -64,7 +65,9 @@ def dense_oracle(model, tokens, storage_dtype=None):
             key_ids = torch.tensor([head*p + ((l-1)*cfg.write_dim+j) % p
                 for head in range(cfg.kv_heads) for j in range(cfg.write_dim)], device=h.device)
             joint = torch.cat((key_ids, key_ids+c))
-            committed = source[..., joint] + layer.pub(layer.n1(h))
+            committed = layer.pub(layer.n1(h))
+            if cfg.residual_write:
+                committed = source[..., joint] + committed
             if storage_dtype is not None:
                 raw_k, raw_v = committed.chunk(2, -1)
                 k = oracle_rotate(raw_k, positions, p, key_ids).to(storage_dtype).to(h.dtype)
@@ -179,7 +182,7 @@ def convert(research_dir, out_dir):
             saved = torch.load(path, weights_only=False)
             meta, alphabet = saved['metadata'], saved['alphabet']
             assert saved['step'] == 1600 and meta['variant'] == 'none' and meta['width'] == width and meta['lam'] == 0.
-            cfg = Config(vocab=len(alphabet)) if width == 24 else Config(vocab=len(alphabet), write_dim=width//2)
+            cfg = Config(vocab=len(alphabet), write_dim=width//2, residual_write=True)
             model = CyclicMemory(cfg).eval().requires_grad_(False)
             model.load_state_dict({k: v for k, v in saved['state_dict'].items() if k != 'address'})
             reference = LocalBank(fresh_bank(seed, len(alphabet), meta['config'], width), 'none',

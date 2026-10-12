@@ -83,7 +83,7 @@ class NarrowCache:
                  'and online-softmax scratch. No history-sized auxiliary tensor.')
 
     @torch.inference_mode()
-    def store(self, layer, source):
+    def store(self, layer, source, *, return_source=True):
         if self.n >= self.capacity or not 0 <= layer < self.layout.depth or layer != self.written+1:
             raise ValueError('Capacity or layer order')
         dim = self.layout.p if layer == 0 else self.layout.q
@@ -100,6 +100,8 @@ class NarrowCache:
         self.keys[layer][:,:,self.n].copy_(rotate(key,cosine,sine))
         self.values[layer][:,:,self.n].copy_(value)
         self.written = layer
+        if not return_source:
+            return None
         current = rotate(self.keys[layer][:,:,self.n].to(self.compute_dtype),cosine,sine,inverse=True)
         return torch.cat((current.flatten(1),self.values[layer][:,:,self.n].to(self.compute_dtype).flatten(1)),-1)
 

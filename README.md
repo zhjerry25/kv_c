@@ -1,14 +1,20 @@
 # kv_c
 
-2026-10-12 本包是层间 KV cache 压缩方法的实现与证据包。项目未定名，kv_c 为临时代号。
+2026-10-12 
+本包是层间 KV cache 压缩方法的实现与证据包。项目未定名，kv_c 为临时代号。
 
 ## 方法
 
-关键帧（embedding 生成的全宽底座 M₀）+ 每层在循环坐标上的残差窄增量（$Z = \text{旧值} + N(H)W$，只写本层坐标）+ 不可变提交片段 + 最近写入者静态地址直接读取 + 提交即旋转 RoPE。无前缀平均、无锚点、无混合预算、无逐层状态。缓存 $c+(L-1)w$ 标量/token，测试小模型缓存为标准逐层 GQA 的 34.375%（w16）或 45.3125%（w24）。完整构造与数学：[docs/method.md](docs/method.md)。全部已有数据与淘汰依据：[docs/results.md](docs/results.md)。
+关键帧（embedding 生成的全宽底座 M₀）+ 每层在循环坐标上的窄发布（$Z = N(H)W$）+ 不可变提交片段 + 最近写入者静态地址直接读取 + 提交即旋转 RoPE。无前缀平均、无锚点、无混合预算、无逐层状态。缓存 $c+(L-1)w$ 标量/token，测试小模型缓存为标准逐层 GQA 的 34.375%（w16）或 45.3125%（w24）。完整构造与数学：[docs/method.md](docs/method.md)。全部已有数据：[docs/results.md](docs/results.md)。
 
 ## 证据边界
 
-质量证据为约 188 万参数字符模型（TinyShakespeare，三种子，训练长度 256）；验证集已参与探索；无 GPU、无大模型质量、无延迟结论。容量公式与实现正确性任意尺寸成立，质量模式在 135M 复现前均为小模型假设。
+质量证据为约 188 万参数字符模型
+
+TinyShakespeare
+3 seed n=256
+
+验证集已参与探索；无 GPU、无大模型质量、无延迟结论。容量公式与实现正确性任意尺寸成立，质量模式在更大模型实验前均为小模型假设。
 
 ## 包内索引
 
@@ -26,7 +32,7 @@
 | 小模型复现训练壳（none/prefix 臂） | [work/run_clean_direct.py](work/run_clean_direct.py)                  |
 | 权重（standalone）                 | [weights/](weights)：none_w24、none_w16、prefix_w24 各 3 种子         |
 | 配对初始化/字母表资产              | [weights/pairing/](weights/pairing)（r16 原主线基线，训练壳复现用）   |
-| 数据                               | [data/](data)：tinyshakespeare.txt（SHA 86c4e6aa…）、ood 四份        |
+| 数据                               | [data/](data)：tinyshakespeare.txt、ood 四份                          |
 | 证据 JSON                          | [outputs/](outputs)：完整比较、OOD、锁定记录、精度/核对、本包核对记录 |
 
 ## 快速核对

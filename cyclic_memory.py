@@ -1,6 +1,7 @@
-"""Cross-layer cyclic residual public K/V with immutable narrow fragments.
+"""Cross-layer cyclic public K/V with immutable narrow fragments.
 
-One narrow residual publication per layer, static complete-pair cyclic writes,
+One narrow direct publication per layer (optional legacy residual writes),
+static complete-pair cyclic writes,
 no prefix sums, no anchors, no mixing budget, no per-layer temporal state.
 Cache closure comes from the write support alone: coordinates outside the
 layer's write set are never touched, so every committed fragment stays
@@ -26,10 +27,14 @@ class Config:
     head_dim: int = 32
     write_dim: int | None = None
     ffn_width: int = 512
+    residual_write: bool = False
+    pub_init_std: float = .0016
 
     def __post_init__(self):
         if self.write_dim is None:
             object.__setattr__(self, 'write_dim', 3 * self.head_dim // 8)
+        if not math.isfinite(self.pub_init_std) or self.pub_init_std <= 0:
+            raise ValueError('Positive finite publication initialization required')
         if min(self.vocab, self.d, self.query_heads, self.kv_heads, self.ffn_width) < 1:
             raise ValueError('Positive dimensions required')
         if self.query_heads % self.kv_heads:
@@ -86,7 +91,7 @@ class CyclicMemory(nn.Module):
             nn.init.normal_(layer.o.weight, std=.02 / math.sqrt(2 * cfg.depth))
             nn.init.normal_(layer.down.weight, std=.02 / math.sqrt(2 * cfg.depth))
             if layer.pub is not None:
-                nn.init.normal_(layer.pub.weight, std=.0016)
+                nn.init.normal_(layer.pub.weight, std=cfg.pub_init_std)
 
     @staticmethod
     def _initialize(module):
@@ -103,21 +108,27 @@ class CyclicMemory(nn.Module):
         physical_key = rotate(key, cosine, sine)
         if storage_dtype is not None:
             physical_key, value = physical_key.to(storage_dtype).to(h.dtype), value.to(storage_dtype).to(h.dtype)
-            key = rotate(physical_key, cosine, sine, inverse=True)
+            if cfg.residual_write:
+                key = rotate(physical_key, cosine, sine, inverse=True)
         for l, layer in enumerate(self.blocks):
             normalized = layer.n1(h)
             if l:
                 ids = getattr(self, f'write_ids_{l}')
-                previous = torch.cat((key.index_select(-1, ids).transpose(1, 2).flatten(-2),
-                                      value.index_select(-1, ids).transpose(1, 2).flatten(-2)), -1)
-                delta = previous + layer.pub(normalized)
-                committed_key, committed_value = [reshape(x, cfg.write_dim) for x in delta.chunk(2, -1)]
+                committed = layer.pub(normalized)
+                if cfg.residual_write:
+                    previous = torch.cat((key.index_select(-1, ids).transpose(1, 2).flatten(-2),
+                                          value.index_select(-1, ids).transpose(1, 2).flatten(-2)), -1)
+                    committed = previous + committed
+                committed_key, committed_value = [reshape(x, cfg.write_dim) for x in committed.chunk(2, -1)]
                 pairs = ids[::2] // 2
                 k = rotate(committed_key, cosine[:, pairs], sine[:, pairs])
                 if storage_dtype is not None:
                     k, committed_value = k.to(storage_dtype).to(h.dtype), committed_value.to(storage_dtype).to(h.dtype)
-                    committed_key = rotate(k, cosine[:, pairs], sine[:, pairs], inverse=True)
-                key, value = key.index_copy(-1, ids, committed_key), value.index_copy(-1, ids, committed_value)
+                    if cfg.residual_write:
+                        committed_key = rotate(k, cosine[:, pairs], sine[:, pairs], inverse=True)
+                if cfg.residual_write:
+                    key = key.index_copy(-1, ids, committed_key)
+                value = value.index_copy(-1, ids, committed_value)
                 physical_key = physical_key.index_copy(-1, ids, k)
             if decoder is not None:
                 decoder.cache.store_prefill_layer(l, physical_key, value)
@@ -149,6 +160,9 @@ class CyclicMemory(nn.Module):
     @classmethod
     def load(cls, path):
         saved = torch.load(path, map_location='cpu', weights_only=True)
+        # Packaged checkpoints predating the direct-write ablation use residuals.
+        saved['config'].setdefault('residual_write', True)
+        saved['config'].setdefault('pub_init_std', .0016)
         model = cls(Config(**saved['config'])).to(dtype=saved['state_dict']['embed.weight'].dtype)
         model.load_state_dict(saved['state_dict'])
         return model
@@ -172,17 +186,23 @@ class Decoder:
     def append(self, token):
         m, cfg = self.model, self.model.config
         h = m.embed(token)
-        key, value = [x.reshape(token.shape[0], cfg.kv_heads, cfg.head_dim)
-                      for x in self.cache.store(0, m.initial(m.initial_norm(h))).chunk(2, -1)]
+        source = self.cache.store(0, m.initial(m.initial_norm(h)), return_source=cfg.residual_write)
+        if cfg.residual_write:
+            key, value = [x.reshape(token.shape[0], cfg.kv_heads, cfg.head_dim)
+                          for x in source.chunk(2, -1)]
         for l, layer in enumerate(m.blocks):
             normalized = layer.n1(h)
             if l:
                 ids = self.cache.ids[l]
-                previous = torch.cat((key.index_select(-1, ids).flatten(1), value.index_select(-1, ids).flatten(1)), -1)
-                committed = previous + layer.pub(normalized)
-                k, v = [x.reshape(token.shape[0], cfg.kv_heads, cfg.write_dim)
-                        for x in self.cache.store(l, committed).chunk(2, -1)]
-                key.index_copy_(-1, ids, k); value.index_copy_(-1, ids, v)
+                committed = layer.pub(normalized)
+                if cfg.residual_write:
+                    previous = torch.cat((key.index_select(-1, ids).flatten(1), value.index_select(-1, ids).flatten(1)), -1)
+                    committed = previous + committed
+                source = self.cache.store(l, committed, return_source=cfg.residual_write)
+                if cfg.residual_write:
+                    k, v = [x.reshape(token.shape[0], cfg.kv_heads, cfg.write_dim)
+                            for x in source.chunk(2, -1)]
+                    key.index_copy_(-1, ids, k); value.index_copy_(-1, ids, v)
             query = layer.q(normalized).reshape(token.shape[0], cfg.query_heads, cfg.head_dim)
             query = self.cache.rotate_query(query)
             h = layer.feedforward(h + layer.o(self.cache.attention(l, query).flatten(-2)))
