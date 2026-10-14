@@ -1,5 +1,9 @@
 # kv_c
 
+
+- **重要提示：本项目MLA实现错误，缺少query和latent两个Norm，本条消息存在即表明错误尚未修复，请谨慎看待全部MLA实验结果。**
+
+
 本包是层间 KV cache 压缩方法的实现与证据包。项目未定名，kv_c 为临时代号。
 
 项目从 GQA 出发且已扩展 MLA（DeepSeek-V2）和 TPA（NeurIPS 2025）
