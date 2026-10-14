@@ -1,15 +1,22 @@
 # kv_c
 
-2026-10-12 
 本包是层间 KV cache 压缩方法的实现与证据包。项目未定名，kv_c 为临时代号。
+
+项目从 GQA 出发且已扩展 MLA（DeepSeek-V2）和 TPA（NeurIPS 2025）
+
+对于后二者，在潜码/因子坐标上直接应用相同的循环窄覆盖。
+
+实现为 [factorized_memory.py](factorized_memory.py) 和 [fragment_cache.py](fragment_cache.py)，适配方式见 [方法文档](docs/method.md#mla--tpa-适配)。
+
+MLA 另支持 `share_rope=False`：只压缩 KV 潜码，RoPE Key 每层独立生成、完整缓存。[结果与旧共享 RoPE 对照](docs/results.md#mla-独立-rope-实验2026-10-13)。
 
 ## 方法
 
-关键帧（embedding 生成的全宽底座 M₀）+ 每层在循环坐标上的窄发布（$Z = N(H)W$）+ 不可变提交片段 + 最近写入者静态地址直接读取 + 提交即旋转 RoPE。无前缀平均、无锚点、无混合预算、无逐层状态。缓存 $c+(L-1)w$ 标量/token，测试小模型缓存为标准逐层 GQA 的 34.375%（w16）或 45.3125%（w24）。完整构造与数学：[docs/method.md](docs/method.md)。全部已有数据：[docs/results.md](docs/results.md)。
+关键帧（embedding 生成的全宽底座 M₀）+ 每层在坐标上的窄发布（$Z = N(H)W$）+ 不可变提交片段 + 最近写入者静态地址直接读取 + 提交即旋转 RoPE。无前缀平均、无锚点、无混合预算、无逐层状态。缓存 $c+(L-1)w$ 标量/token，测试小模型缓存为标准逐层 GQA 的 34.375%（w16）或 45.3125%（w24）。完整构造与数学：[docs/method.md](docs/method.md)。全部已有数据：[docs/results.md](docs/results.md)。
 
 ## 证据边界
 
-质量证据为约 188 万参数字符模型
+质量证据为约 188 万参数 GQA 与约 199–210 万参数 MLA/TPA 字符模型；MLA/TPA 的 18 组完整预算实验已完成，结果与数值限制见 [记录](docs/results.md#mla--tpa-标准实验2026-10-13)。
 
 TinyShakespeare
 3 seed n=256
@@ -55,8 +62,36 @@ python3 -m venv .venv
 小模型复现训练（配对资产已在 weights/pairing）：
 
 ```bash
-cd work && ../../.venv/bin/python run_clean_direct.py --variant none --width 24 --seed 0 --threads 2 --tag my_run
+cd work && ../.venv/bin/python run_clean_direct.py --variant none --width 24 --seed 0 --threads 2 --tag my_run
 ```
+
+## MLA / TPA 本机标准实验
+
+在项目根目录运行；只依赖包内语料，不需要原研究树或预训练权重。
+
+```bash
+.venv/bin/python work/verify_attention_adaptation.py
+.venv/bin/python work/run_attention_adaptation.py --all --jobs 2 --tag my_mla_tpa
+```
+
+训练为每种注意力的原生、1/4 窄写、3/8 窄写三臂，各种子 0/1/2，共 18 组；每组 1600 步、B=16、n=256。脚本自动完成 256/512/1024 全验证、既有 OOD 的 FP32/BF16 评分和训练权重解码核对。结果、曲线、环境、代码/数据哈希位于 `outputs/<tag>/`，最终 standalone 权重位于 `weights/<tag>/`；每 100 步保存断点，成功后清理优化器断点。重跑同一命令可续跑或检查已完成结果。
+
+单组运行示例：
+
+```bash
+.venv/bin/python work/run_attention_adaptation.py --attention mla --arm f25 --seed 0 --tag my_mla_tpa
+```
+
+正式记录使用 `attention_adaptation` 标签：[汇总 JSON](outputs/attention_adaptation/summary.json)、[结果说明](docs/results.md#mla--tpa-标准实验2026-10-13)、[通用核对](outputs/attention_adaptation_verification.json)、[断点恢复核对](outputs/attention_adaptation_resume_check.json)。
+
+MLA 独立 RoPE 复现（复用包内 `attention_adaptation` 原生基线与共享 RoPE 对照；仅从头训练六组新模型）：
+
+```bash
+.venv/bin/python work/verify_attention_adaptation.py --output outputs/mla_independent_rope_verification_rerun.json
+.venv/bin/python work/study_mla_independent_rope.py --all --jobs 2 --tag mla_independent_rope_rerun
+```
+
+训练与评估预算保持上述标准，六组一次排队、最多两组并行，成功后自动清理优化器断点；原始记录为 [汇总](outputs/mla_independent_rope/summary.json)、[权重](weights/mla_independent_rope/)、[交付清单](outputs/mla_independent_rope/delivery.json)。
 
 ## 转换与来源
 

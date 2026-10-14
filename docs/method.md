@@ -1,6 +1,5 @@
-# kv_c：构造与数学
+# 构造与数学
 
-2026-10-12
 这是 kv_c 的方法文档。构造、缓存定理、RoPE、误差与容量全部在此。实现为 [cyclic_memory.py](../cyclic_memory.py) 与 [narrow_cache.py](../narrow_cache.py)，只依赖 PyTorch。已有数据见 [results.md](results.md)。
 
 ## 构造
@@ -88,3 +87,61 @@ $$
 ## 证据边界
 
 已有完整预算质量证据来自旧残差构造、约 188 万参数的字符级小模型（TinyShakespeare，三种子，L=8，训练长度 256）；新直接覆盖构造有训练长度 128 的单种子 200 步初筛，以及训练长度 256 的三种子 600 步配对实验。验证集已参与探索；无 GPU kernel、无大模型质量、无延迟结论。容量公式与数学在任意尺寸成立，质量结论不外推。
+
+MLA/TPA 扩展另有 18 组 1600 步、B=16、n=256 的完整预算实验，模型约 199–210 万参数，采用直接覆盖。结果、配对区间、OOD 与 TPA BF16 长解码数值限制见 [新记录](results.md#mla--tpa-标准实验2026-10-13)；通用正确性核对不构成任意低精度长解码稳定性的保证。
+
+MLA 独立 RoPE 变体另完成六组相同预算实验，复用原生基线；见 [结果](results.md#mla-独立-rope-实验2026-10-13)。
+
+## MLA / TPA 适配
+
+实现：[factorized_memory.py](../factorized_memory.py)、[fragment_cache.py](../fragment_cache.py)。两种注意力都把**实际应缓存的压缩表示**作为公共坐标，沿用直接覆盖公式；第 0 层读取 embedding 经独立 RMSNorm 和全宽投影生成的底座，其余层使用各自私有 pre-norm 状态生成窄发布。每组坐标按自身宽度独立循环，最近写入者地址在初始化时确定。原生对照则每层独立生成全宽压缩表示。
+
+### MLA
+
+采用 [DeepSeek-V2 §2.1](https://arxiv.org/html/2405.04434v5#S2.SS1) 的低秩 KV、低秩 Query 和解耦 RoPE。缓存坐标为 $[c^{KV}, k^R]$，宽度为 $C=d_c+d_R$。位置 Key 的写入只包含完整旋转对，提交时旋转；潜码不旋转。各层拥有私有 $W_l^{UK},W_l^{UV}$，attention 分数为
+
+$$
+s_{t,j,i}=\frac{(W_{l,i}^{UK\top}q^C_{t,i})^\top c^{KV}_{l,j}
+ +(\operatorname{RoPE}(q^R_{t,i}))^\top\widetilde{k}^R_{l,j}}
+ {\sqrt{d_h+d_R}}.
+$$
+
+流式解码直接对潜码加权，再应用 $W_l^{UV}$ 和输出投影；没有历史宽 Key/Value 数组。训练为了使用 CPU SDPA，临时展开当层 K/V；Value 补零到 Query/Key 宽度以使用同宽 SDPA，之后丢弃补零输出。这与原 attention 数学相同，独立 oracle 使用未补零的显式 softmax 检查。
+
+小模型：$d_c=64,d_R=16,d'_c=64,H=4,d_h=32$。两档分别对潜码/位置 Key 写入 $(16,4)$ 或 $(24,6)$，故 $C=80,w=20/30$。普通线性权重 std=.02，窄发布 std=.0016；残差输出投影按项目深度缩放。
+
+### MLA：RoPE 独立缓存
+
+`AttentionConfig(attention='mla', share_rope=False, cache_mode='cyclic', ...)` 只在 KV 潜码上使用循环窄覆盖。每层位置 Key 按原生 MLA 从该层私有 pre-norm 状态生成，并完整保存：
+
+$$
+\widetilde{k}_{l,j}^{R}=\operatorname{RoPE}_j\!\left(W_l^{KR}N_l(H_l[j])\right).
+$$
+
+位置 Key 的全部 $d_R$ 个坐标在每层重新写入，本层只读本层的历史位置 Key；没有位置坐标的跨层共享。这里独立的是层间缓存，仍沿用 MLA 原生的头间共享位置 Key。第 0 层也使用自己的私有 pre-norm 与位置投影；embedding 全宽底座只生成 KV 潜码。Query、潜码投影吸收、输出与 FFN 均保持原来的 MLA 路径。位置投影采用普通线性初始化 std=.02，潜码窄发布仍为 std=.0016，BF16 仍先旋转再舍入。
+
+令 $w_c$ 为潜码窄写宽度，历史标量数为
+
+$$
+d_c+(L-1)w_c+Ld_R.
+$$
+
+小模型的 $w_c=16/24$ 得 304/360 标量/token，相对原生 $L(d_c+d_R)=640$ 为 **47.5% / 56.25%**；16K、B=1、BF16 历史分别为 **9.5 / 11.25 MiB**。通用片段缓存把位置组视为每层全宽写入，其最近写入者恒为当前层；仍只保存潜码底座、潜码片段与各层完整位置 Key。
+
+`share_rope` 默认 True，缺少该字段的旧权重保持原有语义；False 仅支持 MLA，原生 MLA 本身始终逐层保存完整位置 Key。独立 RoPE 实验与旧共享版本使用完全相同的潜码底座、潜码发布和共用私有初始张量，额外位置投影逐层复制同种子原生模型的初始张量。六组完整预算结果见 [独立 RoPE 实验](results.md#mla-独立-rope-实验2026-10-13)。
+
+### TPA
+
+采用 [Tensor Product Attention §3](https://arxiv.org/html/2501.06425v5#S3) 的完整上下文分解：$Q=A_Q^\top B_Q/R_Q$，$K=A_K^\top B_K/R_K$，$V=A_V^\top B_V/R_V$。Query 每层私有，公共缓存坐标为 $[A_K,B_K,A_V,B_V]$。RoPE 作用于 $B_Q,B_K$ 的完整特征旋转对；$B_K$ 在提交时旋转。头系数 A 与 Value 因子不旋转。四组因子均由上下文生成，分别循环覆盖；读取的因子仍按原来的 rank 组成张量积。
+
+流式解码读取因子 tile，先把当前 Query 与 $B_K$ 相乘、按 $A_K$ 混合出分数，再以 $A_V,B_V$ 聚合 Value，在线 softmax 合并各 tile。没有历史展开 K/V。训练临时展开当层 Q/K/V 后使用 SDPA，保留各自的 $1/R$ 缩放。
+
+小模型：$H=4,d_h=32,(R_Q,R_K,R_V)=(6,2,2)$，四组宽度 $(8,64,8,64)$，$C=144$。两档写入 $(2,16,2,16)$ 或 $(3,24,3,24)$，$w=36/54$；A 的奇数写宽合法，旋转的 $B_K$ 写宽始终为偶数。因子投影采用论文的 Xavier uniform，按完整原生因子映射的 fan-in/fan-out 定标；配对实验中的窄发布直接选择原生随机投影行。没有把 GQA 的小高斯发布初始化套到双线性因子上。
+
+### 共用接口、缓存与配对
+
+`AttentionConfig(attention='mla'|'tpa', cache_mode='native'|'cyclic', write_fraction='1/4'|'3/8', ...)` 与 `AttentionMemory` 提供 `forward`、`forward_stored`、`new_cache`、`save/load`。默认 MLA、cyclic、3/8；其他可整除且满足完整旋转对的维数/比例也可使用。`paired_model(config, seed)` 生成实验模型：同一注意力和种子的 embedding、Query、MLA 上投影、输出、FFN、私有 norms 及底座初始张量相同；MLA 的两个窄写臂选择同一额外小高斯随机银行的对应行。全部均为新生成的随机张量。
+
+通用缓存保存已经旋转/舍入的物理片段，历史标量数仍为 $C+(L-1)w$；原生对照为 $LC$。默认全部组窄写时，$L=8$ 的两档分别为各自原生缓存的 34.375% / 45.3125%；MLA 独立 RoPE 的 $w=w_c+d_R$，比率如上节。两种注意力的原生 C 不同，结果同时报告绝对字节数；这个比率不以 GQA 为分母。静态索引、频率和 tile 读取空间另行记录，无历史规模的持久辅助数组。BF16 路径让私有反馈建立在实际舍入片段上。
+
+不可变性与最近写入者定理适用于潜码/因子坐标。MLA 每层上投影以及 TPA 的张量积可以使展开 K/V 的更多坐标改变，不能把源坐标上的恒等或误差界直接当成展开 K/V 的界。新缓存是所定义窄写轨迹的精确编码；质量由对应架构从头训练后的实测结果回答。

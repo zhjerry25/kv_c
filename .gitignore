@@ -1,3 +1,6 @@
 data/
 weights/
 outputs/
+.venv/
+__pycache__/
+*.pyc
