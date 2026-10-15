@@ -84,13 +84,28 @@ class AttentionConfig:
         return sum(c.write_width for c in self.components)
 
 
+class MLARMSNorm(nn.Module):
+    """DeepSeek-V2 latent RMSNorm; retain FP64 for numerical verification."""
+    def __init__(self, width, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(width))
+        self.eps = eps
+
+    def forward(self, x):
+        values = x if x.dtype == torch.float64 else x.float()
+        values = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + self.eps)
+        return self.weight * values.to(x.dtype)
+
+
 class AttentionBlock(nn.Module):
     def __init__(self, cfg, layer):
         super().__init__()
         self.n1, self.n2 = RMSNorm(cfg.d), RMSNorm(cfg.d)
         if cfg.attention == 'mla':
             self.q_down = nn.Linear(cfg.d, cfg.query_latent_dim, bias=False)
+            self.q_norm = MLARMSNorm(cfg.query_latent_dim)
             self.q_up = nn.Linear(cfg.query_latent_dim, cfg.heads * (cfg.head_dim + cfg.rope_dim), bias=False)
+            self.kv_norm = MLARMSNorm(cfg.kv_latent_dim)
             self.k_up = nn.Linear(cfg.kv_latent_dim, cfg.heads * cfg.head_dim, bias=False)
             self.v_up = nn.Linear(cfg.kv_latent_dim, cfg.heads * cfg.head_dim, bias=False)
         else:
@@ -180,7 +195,7 @@ class AttentionMemory(nn.Module):
         cfg = self.config
         b, n = normalized.shape[:2]
         if cfg.attention == 'mla':
-            q = layer.q_up(layer.q_down(normalized)).reshape(
+            q = layer.q_up(layer.q_norm(layer.q_down(normalized))).reshape(
                 b, n, cfg.heads, cfg.head_dim + cfg.rope_dim).transpose(1, 2)
             content, positional = q.split((cfg.head_dim, cfg.rope_dim), -1)
             cosine, sine = rotary_coefficients(positions, cfg.rope_dim, q.dtype, q.device)
@@ -205,6 +220,7 @@ class AttentionMemory(nn.Module):
         b, n = source.shape[:2]
         if cfg.attention == 'mla':
             latent, positional = source.split((cfg.kv_latent_dim, cfg.rope_dim), -1)
+            latent = layer.kv_norm(latent)
             content = layer.k_up(latent).reshape(b, n, cfg.heads, cfg.head_dim).transpose(1, 2)
             key = torch.cat((content, positional[:, None].expand(-1, cfg.heads, -1, -1)), -1)
             value = layer.v_up(latent).reshape(b, n, cfg.heads, cfg.head_dim).transpose(1, 2)
@@ -332,6 +348,9 @@ class AttentionDecoder:
             source = self.cache.read_tile(l, start, min(start + self.cache.tile, self.cache.length))
             if cfg.attention == 'mla':
                 latent, positional = source.split((cfg.kv_latent_dim, cfg.rope_dim), -1)
+                # Normalize each token's complete assembled latent, never a
+                # narrow publication or a softmax-weighted latent aggregate.
+                latent = layer.kv_norm(latent)
                 scores = (torch.einsum('bhc,btc->bht', qc, latent)
                           + torch.einsum('bhr,btr->bht', qr, positional)) / scale
             else:

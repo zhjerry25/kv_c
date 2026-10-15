@@ -18,7 +18,7 @@ from torch.nn import functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from factorized_memory import AttentionConfig, AttentionMemory, paired_model
+from factorized_memory import AttentionConfig, AttentionMemory, MLARMSNorm, paired_model
 from fragment_cache import Component, FragmentCache, FragmentLayout
 
 
@@ -29,6 +29,37 @@ def oracle_rotate(x, positions, p, coordinates=None):
     cosine, sine = phase.cos().to(x.dtype), phase.sin().to(x.dtype)
     a, b = x[..., ::2], x[..., 1::2]
     return torch.stack((a * cosine - b * sine, a * sine + b * cosine), -1).flatten(-2)
+
+
+def oracle_latent_norm(x, weight):
+    values = x if x.dtype == torch.float64 else x.float()
+    return weight * (values / torch.sqrt(values.square().mean(-1, keepdim=True) + 1e-6)).to(x.dtype)
+
+
+def official_norm_check():
+    """Compare the two latent norms to DeepseekV2RMSNorm's FP32 equations."""
+    rows = []
+    for width in (16, 64):
+        for dtype in (torch.float32, torch.bfloat16):
+            norm = MLARMSNorm(width).to(dtype=dtype)
+            with torch.no_grad():
+                norm.weight.copy_(torch.linspace(.5, 1.5, width))
+            x = torch.linspace(-2, 3, 4 * width).reshape(4, width).to(dtype)
+            x[0].zero_()
+            x[1].mul_(1e-4)
+            x.requires_grad_()
+            # Literal numerical order from the official DeepSeek-V2 module.
+            values = x.to(torch.float32)
+            values = values * torch.rsqrt(values.pow(2).mean(-1, keepdim=True) + 1e-6)
+            expected = norm.weight * values.to(dtype)
+            actual = norm(x)
+            assert torch.equal(actual, expected)
+            gradients = torch.autograd.grad(actual.float().square().mean(), (x, norm.weight))
+            reference = torch.autograd.grad(expected.float().square().mean(), (x, norm.weight))
+            assert all(torch.equal(a, b) for a, b in zip(gradients, reference))
+            rows.append(dict(width=width, dtype=str(dtype), forward_and_gradients_exact=True))
+    return dict(source='https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/94cf30b/modeling_deepseek.py',
+                epsilon=1e-6, rows=rows)
 
 
 def dense_oracle(model, tokens, storage_dtype=None, return_states=False):
@@ -64,12 +95,14 @@ def dense_oracle(model, tokens, storage_dtype=None, return_states=False):
             base += width
         states.append(state)
         if cfg.attention == 'mla':
-            q = F.linear(F.linear(normalized, layer.q_down.weight), layer.q_up.weight).reshape(
+            compressed_q = oracle_latent_norm(F.linear(normalized, layer.q_down.weight), layer.q_norm.weight)
+            q = F.linear(compressed_q, layer.q_up.weight).reshape(
                 b, n, cfg.heads, cfg.head_dim + cfg.rope_dim)
             qc, qr = q.split((cfg.head_dim, cfg.rope_dim), -1)
             qr = oracle_rotate(qr.flatten(-2), positions, cfg.rope_dim).reshape_as(qr)
             query = torch.cat((qc, qr), -1).transpose(1, 2)
             latent, positional = state.split((cfg.kv_latent_dim, cfg.rope_dim), -1)
+            latent = oracle_latent_norm(latent, layer.kv_norm.weight)
             kc = F.linear(latent, layer.k_up.weight).reshape(b, n, cfg.heads, cfg.head_dim)
             key = torch.cat((kc, positional[:, :, None].expand(-1, -1, cfg.heads, -1)), -1).transpose(1, 2)
             value = F.linear(latent, layer.v_up.weight).reshape(b, n, cfg.heads, cfg.head_dim).transpose(1, 2)
@@ -272,7 +305,8 @@ def main():
         (ROOT / name).read_bytes()).hexdigest() for name in (
             'factorized_memory.py', 'fragment_cache.py', 'work/verify_attention_adaptation.py')})
     if not args.skip_generic:
-        result.update(pairing=pairing_check(), invalid_inputs=invalid_checks(), generic=generic())
+        result.update(official_norm=official_norm_check(), pairing=pairing_check(),
+                      invalid_inputs=invalid_checks(), generic=generic())
     result['trained'] = []
     for path in args.weights:
         model = AttentionMemory.load(path).eval().requires_grad_(False)
