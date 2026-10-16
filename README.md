@@ -28,6 +28,7 @@ TinyShakespeare
 | 内容                               | 位置                                                                 |
 | ---------------------------------- | -------------------------------------------------------------------- |
 | 构造与数学                         | [docs/method.md](docs/method.md)                                      |
+| 交互式方法讲解（离线 HTML）        | [docs/interactive.html](docs/interactive.html)                        |
 | 已有数据与淘汰依据                 | [docs/results.md](docs/results.md)                                    |
 | 默认模型                           | [cyclic_memory.py](cyclic_memory.py)                                  |
 | 前缀对照臂模型                     | [public_memory.py](public_memory.py)                                  |
