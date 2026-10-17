@@ -13,12 +13,14 @@ from .config import ModelConfig, PRESETS, local_path, configure_runtime_cache
 from .data import PackedTokens
 from .model import Transformer
 from .precision import Precision
+from .initialization import paired_initialize
 
 
 DEFAULTS = dict(data="data/fineweb-edu", out="runs/train", seq_len=2048, batch_size=2,
                 accumulation=8, steps=1000, lr=3e-4, min_lr_ratio=0.1, warmup=100,
                 weight_decay=0.1, grad_clip=1.0, seed=42, fp8="off", dtype="auto",
-                log_every=10, eval_every=100, eval_batches=10, save_every=100, loss_chunk_size=1024)
+                log_every=10, eval_every=100, eval_batches=10, save_every=100, loss_chunk_size=1024,
+                paired_init=False)
 
 
 def lr_at(step, total, warmup, lr, min_lr_ratio):
@@ -61,12 +63,16 @@ def parser():
     p.add_argument("--write-fraction")
     p.add_argument("--share-rope", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--activation-checkpoint", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--paired-init", action=argparse.BooleanOptionalAction, default=None,
+                   help="Pair private weights and full publication banks across write fractions")
     p.add_argument("--device", default="auto")
     p.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--dry-run", action="store_true", help="Print shapes/parameter count on meta device")
     p.add_argument("--resume")
     p.add_argument("--stop-after", type=int, help="Stop after this total step without changing the LR horizon")
     for key, default in DEFAULTS.items():
+        if key == "paired_init":
+            continue
         choices = ("off", "delayed", "current", "mxfp8") if key == "fp8" else (("auto", "fp32", "bf16") if key == "dtype" else None)
         p.add_argument("--" + key.replace("_", "-"), type=type(default), choices=choices, default=None)
     return p
@@ -75,7 +81,9 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     saved = torch.load(local_path(args.resume), map_location="cpu", weights_only=True) if args.resume else None
-    settings = dict(saved["settings"] if saved else DEFAULTS)
+    settings = dict(DEFAULTS)
+    if saved:
+        settings.update(saved["settings"])
     adjustable = {"log_every", "eval_every", "save_every", "eval_batches"}
     for key in DEFAULTS:
         value = getattr(args, key)
@@ -134,6 +142,8 @@ def main(argv=None):
     precision = Precision(settings["fp8"], device)
     precision.validate_batch(settings["batch_size"] * settings["seq_len"])
     model = Transformer(cfg, precision).to(device)
+    if settings["paired_init"] and not saved:
+        paired_initialize(model, settings["seed"])
     if settings["fp8"] != "off" and precision.converted == 0:
         raise ValueError("This model has no FP8-eligible large linear layers; use a larger preset or --fp8 off")
     model.kernel.prepare(settings["seq_len"], device)
@@ -223,7 +233,7 @@ def main(argv=None):
                 log.write(json.dumps(record) + "\n")
                 print(json.dumps(record), flush=True)
                 interval_losses, interval_seconds, interval_tokens = [], 0.0, 0
-            if settings["eval_every"] and completed % settings["eval_every"] == 0:
+            if settings["eval_every"] and (completed % settings["eval_every"] == 0 or completed == settings["steps"]):
                 record = dict(step=completed, val_loss=evaluate())
                 log.write(json.dumps(record) + "\n")
                 print(json.dumps(record), flush=True)

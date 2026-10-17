@@ -100,3 +100,24 @@ python -m kvtrain.train --preset tiny --attention mla --mode cyclic \
 ```
 
 CPU 检查覆盖模式组合、跨圈覆盖、缓存不可变与逐 token 等价、MLA 独立 RoPE、梯度重算一致性、BF16 反向、分块 loss、分片边界、校验和损坏检测及完整断点恢复。实际本机验证记录见 `validation.json`。
+
+## 50M 单 seed write fraction 扫描
+
+```bash
+# 准备一次，全部实验共享；输出目录须为空。
+python -m kvtrain.data --output data/fineweb-edu-1b --seed 0 \
+  --train-tokens 1100000000 --val-tokens 2000000
+python -m kvtrain.data --verify data/fineweb-edu-1b
+python -m kvtrain.sweep --dry-run
+python -m kvtrain.sweep --compile
+```
+
+默认 24 组：GQA/MLA/TPA 各一组 standard，加 cyclic 的 `1/16, 1/8, 1/4, 3/8, 1/2, 3/4, 1`。固定 d=512、L=10、FFN=1408、完整因果注意力、MLA 共享位置 Key，实际参数约 52–57M；不改变主干来补齐各比例减少的发布参数。10 层的缓存比例依次为 15.625%、21.25%、32.5%、43.75%、55%、77.5%、100%。其中 1/16 只在其余九层覆盖 56.25% 的公共坐标，1/8 已能完整覆盖一轮。
+
+训练 seed=0，2048 context，micro batch=4，accumulation=4，32768 steps，即每组 1,073,741,824 个采样 token，24 组合计约 25.77B。LR=3e-4，warmup=512，cosine；每 1024 步验证相同的 524,288 个采样 token 并保存断点。默认 BF16、FP8 off，避免不同窄宽度的 FP8 对齐资格成为额外变量。`--compile` 可选；需要 FP8 时可用 `--fp8 current --compile` 或 `--fp8 delayed`，该矩阵的结论会同时包含 FP8 策略影响。
+
+脚本自动使用 `--paired-init`：按参数名称独立固定随机流，同架构各比例的私有初始权重一致；窄发布从同一层的全宽随机银行选择对应行。关键帧与 standard 首层发布初始张量一致。保留原方法的初始化幅度：GQA/MLA 的后续 cyclic 发布 std=.0016，standard std=.02；TPA 按完整因子宽度 Xavier 定标。因此 cyclic=1 仍是独立的全宽方法对照，不能直接视作 standard。
+
+单 GPU 逐组执行：先完成三个 standard 和三个 cyclic=1 对照，再按比例轮转三种架构。重跑同一命令自动续训未完成组、跳过已完成组。输出 `runs/50m-write-sweep/summary.csv` 与 `summary.json`，包含最终验证 NLL/PPL、相对各自 standard / cyclic=1 的 ΔNLL、实际参数、绝对发布宽度、缓存比例、吞吐和显存。首要比较同架构的 ΔNLL–缓存比例曲线；单 seed 用于探索拐点，不报告统计显著性。
+
+修改 `--steps`、`--fractions`、`--attention`、`--window` 等配置请使用新 `--out`；矩阵会校验计划、数据指纹与 PyTorch 版本。默认要求训练语料至少达到每组 token 预算，显式 `--allow-data-repeat` 可放开此检查；随机窗口采样本身允许重复。开始前追加 `--include-cla` 可扩展为 27 组（每种注意力增加 CLA group-size=2 对照）。
