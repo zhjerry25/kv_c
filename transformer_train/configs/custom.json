@@ -1,0 +1,13 @@
+{
+  "dim": 512,
+  "layers": 10,
+  "heads": 8,
+  "kv_heads": 2,
+  "head_dim": 64,
+  "ffn_dim": 1408,
+  "kv_latent_dim": 256,
+  "q_latent_dim": 256,
+  "rope_dim": 32,
+  "attention": "gqa",
+  "mode": "standard"
+}

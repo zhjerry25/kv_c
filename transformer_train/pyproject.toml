@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kvtrain"
+version = "0.1.0"
+description = "Standalone single-GPU Transformer training with cross-layer KV modes"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.7", "numpy>=1.26", "datasets>=3.6,<5", "tokenizers>=0.21", "huggingface-hub>=0.30"]
+
+[project.scripts]
+kvtrain = "kvtrain.train:main"
+kvprepare = "kvtrain.data:main"
+
+[tool.setuptools.packages.find]
+include = ["kvtrain*"]

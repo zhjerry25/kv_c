@@ -1,0 +1,64 @@
+{
+  "client_date": "2026-10-16",
+  "runtime": {
+    "python": "3.13.5",
+    "torch": "2.14.1",
+    "numpy": "2.5.4",
+    "datasets": "4.8.5",
+    "tokenizers": "0.23.3",
+    "device": "cpu",
+    "cuda_available": false
+  },
+  "cpu_checks": {
+    "unittest_cases": 6,
+    "attention_mode_window_combinations": 18,
+    "passed": true,
+    "exact_resume_weights": true,
+    "cache_immutability_and_wrap": true,
+    "cpu_bf16_backward": true,
+    "relocated_source_tests_passed": true
+  },
+  "fineweb_edu_live": {
+    "source": {
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "max_docs": 128,
+      "resolved_revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+      "revision": "main",
+      "shuffle_buffer": 0,
+      "subset": "sample-10BT"
+    },
+    "tokenizer": {
+      "eos_id": 50256,
+      "name": "gpt2",
+      "revision": "main",
+      "sha256": "8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6",
+      "vocab_size": 50257
+    },
+    "documents": {
+      "empty": 0,
+      "scanned": 34,
+      "train": 9,
+      "val": 3
+    },
+    "tokens": {
+      "train": 8192,
+      "val": 2048
+    },
+    "shard_checksum_verification": true,
+    "clean_cli_exit": true
+  },
+  "real_data_cpu_training": {
+    "steps": 2,
+    "attention": "mla",
+    "mode": "cyclic",
+    "last_train_loss": 10.84760856628418,
+    "last_val_loss": 10.842789649963379,
+    "compiled_mla_cyclic_swa_step_passed": true,
+    "compiled_validation_loss": 10.857978820800781
+  },
+  "not_run": [
+    "CUDA kernels",
+    "FP8 GPU training and throughput",
+    "50M-1B quality experiments"
+  ]
+}
